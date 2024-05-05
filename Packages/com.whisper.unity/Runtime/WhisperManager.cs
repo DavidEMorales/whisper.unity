@@ -70,7 +70,7 @@ namespace Whisper
         public bool dropOldBuffer;
 
         [Tooltip("If true stream will ignore audio chunks with no detected speech.")]
-        public bool useVad = true;
+        public bool useVad = false;
 
         [Header("Experimental settings")]
         [Tooltip("[EXPERIMENTAL] Output timestamps for each token. Need enabled tokens to work.")]

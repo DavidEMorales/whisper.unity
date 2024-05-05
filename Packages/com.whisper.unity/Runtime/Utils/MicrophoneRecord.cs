@@ -154,7 +154,7 @@ namespace Whisper.Utils
 
             // still recording - update chunks and vad
             UpdateChunks(micPos);
-            UpdateVad(micPos);
+            //UpdateVad(micPos);
         }
         
         private void UpdateChunks(int micPos)

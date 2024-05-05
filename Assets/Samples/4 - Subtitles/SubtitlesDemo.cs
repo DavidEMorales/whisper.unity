@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
+using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using UnityEngine;
@@ -14,71 +16,158 @@ namespace Whisper.Samples
     /// </summary>
     public class SubtitlesDemo : MonoBehaviour
     {
+        public static int MIN_CENSORED_WORD_LENGTH = 6;
+        public static SubtitlesDemo Instance;
+
         public WhisperManager whisper;
-        public AudioClip clip;
-        
-        [Header("UI")] 
-        public Button button;
+        public MicrophoneRecord microphoneRecord;
+        public AudioClip noiseAudio;
+
         public Text outputText;
-        public Text timeText;
-        public Dropdown languageDropdown;
-        public Toggle translateToggle;
-        public ScrollRect scroll;
+        
+        public List<string> BannedWords;
+        int offsetSample = 0;
+
+        AudioChunk recordedAudio;
+        string previousSpeech;
 
         private void Awake()
         {
+            Instance = this;
+            BannedWords = new List<string>();
+
             // we need to force this settings for whisper
             whisper.enableTokens = true;
             whisper.tokensTimestamps = true;
-            whisper.OnProgress += OnProgressHandler;
+            whisper.useVad = false;
             
-            languageDropdown.value = languageDropdown.options
-                .FindIndex(op => op.text == whisper.language);
-            languageDropdown.onValueChanged.AddListener(OnLanguageChanged);
-
-            translateToggle.isOn = whisper.translateToEnglish;
-            translateToggle.onValueChanged.AddListener(OnTranslateChanged);
-            
-            button.onClick.AddListener(OnButtonPressed);
+            microphoneRecord.OnRecordStop += OnRecordStop;
         }
         
-        private void OnLanguageChanged(int ind)
+        public void OnButtonPressed()
         {
-            var opt = languageDropdown.options[ind];
-            whisper.language = opt.text;
-        }
-        
-        private void OnTranslateChanged(bool translate)
-        {
-            whisper.translateToEnglish = translate;
+            if (!microphoneRecord.IsRecording)
+            {
+                previousSpeech = null;
+                microphoneRecord.StartRecord();
+            }
+            else
+            {
+                microphoneRecord.StopRecord();
+            }
         }
 
-        private async void OnButtonPressed()
+        private void OnRecordStop(AudioChunk newRecordedAudio)
         {
-            outputText.text = "Transcribing...";
-            var sw = new Stopwatch();
-            sw.Start();
+            recordedAudio = newRecordedAudio;
+        }
+
+        public async Task ProcessAudio()
+        {
+            for (int sampleIndex = 0; sampleIndex < recordedAudio.Data.Length; sampleIndex++)
+            {
+                if (recordedAudio.Data[sampleIndex] > 0.35f)
+                {
+                    offsetSample = sampleIndex;
+                    sampleIndex = recordedAudio.Data.Length;
+                }
+            }
+
+            var newRecordedAudio = new AudioChunk()
+            {
+                Data = new float[recordedAudio.Data.Length - offsetSample],
+                Frequency = recordedAudio.Frequency,
+                Channels = recordedAudio.Channels,
+                Length = recordedAudio.Length - (offsetSample / recordedAudio.Frequency),
+                IsVoiceDetected = recordedAudio.IsVoiceDetected
+            };
+
+
+            for (int sampleIndex = 0; sampleIndex < newRecordedAudio.Data.Length; sampleIndex++)
+            {
+                newRecordedAudio.Data[sampleIndex] = recordedAudio.Data[sampleIndex + offsetSample];
+            }
             
-            // TODO: if you want to speed this up, subscribe to segments event
-            // this code will transcribe whole text first
-            var res = await whisper.GetTextAsync(clip);
-            
-            var time = sw.ElapsedMilliseconds;
-            var rate = clip.length / (time * 0.001f);
-            timeText.text = $"Time: {time} ms\nRate: {rate:F1}x";
+            recordedAudio = newRecordedAudio;
+
+            AudioClip voiceClip = AudioClip.Create(
+                "Speech",
+                recordedAudio.Data.Length,
+                recordedAudio.Channels,
+                recordedAudio.Frequency,
+                false);
+            voiceClip.SetData(recordedAudio.Data, 0);
+
+            var res = await whisper.GetTextAsync(voiceClip);
+
+            var noiseSamples = new float[noiseAudio.samples];
+            noiseAudio.GetData(noiseSamples, 0);
+
+            foreach (var segment in res.Segments)
+            {
+                foreach (var token in segment.Tokens)
+                {
+                    var fullWord = new string(token.Text.Trim().ToLower().Where(c => !char.IsPunctuation(c)).ToArray());
+                    var endsInS = fullWord.Length > 3 && fullWord.Substring(fullWord.Length - 1) == "s";
+
+                    UnityEngine.Debug.Log(fullWord);
+                    if (BannedWords.Contains(fullWord) || (endsInS && BannedWords.Contains(fullWord.Substring(0, fullWord.Length - 1))))
+                    {
+                        UnityEngine.Debug.Log("You said " + fullWord + " at " + token.Timestamp.Start.TotalSeconds + " until " + token.Timestamp.End.TotalSeconds);
+
+                        var startingSample = (int)(token.Timestamp.Start.TotalSeconds * recordedAudio.Frequency * recordedAudio.Channels);
+                        var endingSample = (int)(token.Timestamp.End.TotalSeconds * recordedAudio.Frequency * recordedAudio.Channels);
+                        
+                        for (int sampleIndex = startingSample; sampleIndex < endingSample; sampleIndex++)
+                        {
+                            recordedAudio.Data[sampleIndex] = noiseSamples[sampleIndex + offsetSample];
+                        }
+                    }
+                }
+
+                for (int tokenIndex = 0; tokenIndex < segment.Tokens.Length - 1; tokenIndex++)
+                {
+                    var text = segment.Tokens[tokenIndex].Text + segment.Tokens[tokenIndex + 1].Text;
+                    var fullWord = new string(text.Trim().ToLower().Where(c => !char.IsPunctuation(c)).ToArray());
+                    var endsInS = fullWord.Length > 3 && fullWord.Substring(fullWord.Length - 1) == "s";
+
+                    UnityEngine.Debug.Log(fullWord);
+                    if (BannedWords.Contains(fullWord) || (endsInS && BannedWords.Contains(fullWord.Substring(0, fullWord.Length - 1))))
+                    {
+                        var start = segment.Tokens[tokenIndex].Timestamp.Start;
+                        var end = segment.Tokens[tokenIndex + 1].Timestamp.End;
+
+                        UnityEngine.Debug.Log("You said " + fullWord + " at " + start.TotalSeconds + " until " + end.TotalSeconds);
+
+                        var startingSample = (int)(start.TotalSeconds * recordedAudio.Frequency * recordedAudio.Channels);
+                        var endingSample = (int)(end.TotalSeconds * recordedAudio.Frequency * recordedAudio.Channels);
+
+                        for (int sampleIndex = startingSample; sampleIndex < endingSample; sampleIndex++)
+                        {
+                            recordedAudio.Data[sampleIndex + offsetSample] = noiseSamples[sampleIndex + offsetSample];
+                        }
+                    }
+                }
+            }
 
             // start playing sound
             var go = new GameObject("Audio Echo");
             var source = go.AddComponent<AudioSource>();
-            source.clip = clip;
+            voiceClip.SetData(recordedAudio.Data, 0);
+            source.clip = voiceClip;
             source.Play();
+            outputText = GameObject.Find("Output Text").GetComponent<Text>();
+            outputText.text = string.Empty;
 
             // and show subtitles at the same time
             while (source.isPlaying)
             {
-                var text = GetSubtitles(res, source.time);
-                outputText.text = text;
-                UiUtils.ScrollDown(scroll);
+                var subs = GetSubtitles(res, source.time);
+                /*while (subs.Length > 40)
+                {
+                    subs = subs.Substring(40).Substring(subs.IndexOf(' ') + 1);
+                }*/
+                outputText.text = subs;
                 await Task.Yield();
 
                 // check that audio source still here and wasn't destroyed
@@ -86,7 +175,7 @@ namespace Whisper.Samples
                     return;
             }
 
-            outputText.text = ResultToRichText(res);
+            previousSpeech = outputText.text;
             Destroy(go);
         }
 
@@ -100,7 +189,7 @@ namespace Whisper.Samples
                 // check if we already passed whole segment
                 if (time >= seg.End)
                 {
-                    sb.Append(SegmentToRichText(seg));
+                    sb.Append(SegmentToText(seg));
                     continue;
                 }
 
@@ -108,7 +197,7 @@ namespace Whisper.Samples
                 {
                     if (time > token.Timestamp.Start)
                     {
-                        var text = TokenToRichText(token);
+                        var text = token.Text;
                         sb.Append(text);
                     }
                 }
@@ -117,54 +206,86 @@ namespace Whisper.Samples
             return sb.ToString();
         }
 
-        private static string ResultToRichText(WhisperResult result)
-        {
-            var sb = new StringBuilder();
-            foreach (var seg in result.Segments)
-            {
-                var str = SegmentToRichText(seg);
-                sb.Append(str);
-            }
-
-            return sb.ToString();
-        }
-
-        private static string SegmentToRichText(WhisperSegment segment)
+        private static string SegmentToText(WhisperSegment segment)
         {
             var sb = new StringBuilder();
             foreach (var token in segment.Tokens)
             {
-                var tokenText = TokenToRichText(token);
+                var tokenText = token.Text;
                 sb.Append(tokenText);
             }
 
             return sb.ToString();
         }
-        
-        private static string TokenToRichText(WhisperTokenData token)
+
+        public int GetPreviousTotalWordCount()
         {
-            if (token.IsSpecial)
-                return "";
-            
-            var text = token.Text;
-            var textColor = ProbabilityToColor(token.Prob);
-            var richText = $"<color={textColor}>{text}</color>";
-            return richText;
+            var previousString = new string(previousSpeech.Trim().ToLower().Where(c => !char.IsPunctuation(c)).ToArray());
+            var previousWords = previousString.Split(" ");
+            return previousWords.Count();
         }
-        
-        private static string ProbabilityToColor(float p)
+
+        public int GetPreviousCensoredWordCount()
         {
-            if (p <= 0.33f)
-                return "red";
-            else if (p <= 0.66f)
-                return "yellow";
-            else
-                return "green";
+            var previousString = new string(previousSpeech.Trim().ToLower().Where(c => !char.IsPunctuation(c)).ToArray());
+            var previousWords = previousString.Split(" ");
+            return previousWords.Where(previousWord => BannedWords.Contains(previousWord)).Count();
         }
-        
-        private void OnProgressHandler(int progress)
+
+        public List<string> BanSomeWords(int newBannedWordsCount)
         {
-            timeText.text = $"Progress: {progress}%";
+            var previousStringChars = previousSpeech.Trim().ToLower().ToCharArray();
+            var newString = "";
+            var adding = true;
+            for (int i = 0; i < previousStringChars.Length; i++)
+            {
+                if (previousStringChars[i] == '[')
+                {
+                    adding = false;
+                }
+                else if (i > 1 && previousStringChars[i - 1] == ']')
+                {
+                    adding = true;
+                }
+
+                if (adding)
+                {
+                    newString += previousStringChars[i];
+                }
+            }
+
+            var previousString = new string(newString.Where(c => !char.IsPunctuation(c)).ToArray());
+            var previousWords = previousString.Split(" ");
+
+            var previousWordsByCountDict = new Dictionary<string, int>();
+
+            foreach (var word in previousWords)
+            {
+                if (previousWordsByCountDict.ContainsKey(word))
+                {
+                    previousWordsByCountDict[word] = previousWordsByCountDict[word] + 1;
+                }
+                else
+                {
+                    previousWordsByCountDict[word] = 1;
+                }
+            }
+
+            var previousWordsOrderedByCount = previousWordsByCountDict.Keys.OrderByDescending(word => previousWordsByCountDict[word]).Where(word => word.Length >= MIN_CENSORED_WORD_LENGTH).ToList();
+
+            var newBannedWords = new List<string>();
+            while (previousWordsOrderedByCount.Count > 0 && newBannedWords.Count < newBannedWordsCount)
+            {
+                if (!BannedWords.Contains(previousWordsOrderedByCount[0]))
+                {
+                    BannedWords.Add(previousWordsOrderedByCount[0]);
+                    newBannedWords.Add(previousWordsOrderedByCount[0]);
+                }
+
+                previousWordsOrderedByCount.RemoveAt(0);
+            }
+
+            return newBannedWords;
         }
     }
 }

@@ -4,5 +4,17 @@
 EditorBuildSettings:
   m_ObjectHideFlags: 0
   serializedVersion: 2
-  m_Scenes: []
+  m_Scenes:
+  - enabled: 1
+    path: Assets/Scenes/Title Screen.unity
+    guid: d8c11367604faa24fb83ed559ae012ca
+  - enabled: 1
+    path: Assets/Scenes/GivingASpeechScene.unity
+    guid: 659d6c618f8db419fb8bb41b91787581
+  - enabled: 1
+    path: Assets/Scenes/TVScene.unity
+    guid: cd5a3cb70d39158418925ea6af535969
+  - enabled: 1
+    path: Assets/Scenes/GameOverScene.unity
+    guid: 8a5d301302ac5a343b3da603a67b34b0
   m_configObjects: {}

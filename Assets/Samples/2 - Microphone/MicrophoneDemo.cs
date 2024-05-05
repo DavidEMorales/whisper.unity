@@ -31,6 +31,9 @@ namespace Whisper.Samples
 
         private void Awake()
         {
+            whisper.enableTokens = true;
+            whisper.tokensTimestamps = true;
+
             whisper.OnNewSegment += OnNewSegment;
             whisper.OnProgress += OnProgressHandler;
             
@@ -82,6 +85,9 @@ namespace Whisper.Samples
             var time = sw.ElapsedMilliseconds;
             var rate = recordedAudio.Length / (time * 0.001f);
             timeText.text = $"Time: {time} ms\nRate: {rate:F1}x";
+
+            
+
 
             var text = res.Result;
             if (printLanguage)
